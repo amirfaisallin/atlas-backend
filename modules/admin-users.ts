@@ -137,6 +137,31 @@ export async function setUserProfileName(accountId: string, name: string): Promi
   );
 }
 
+/**
+ * Admin: update user's profile name (leaderboard display).
+ * Body: { name: string }
+ */
+export async function handleAdminSetUserProfileName(req: Request, res: Response): Promise<void> {
+  try {
+    const { id } = req.params;
+    const body = (req.body || {}) as { name?: string };
+    const name = typeof body.name === 'string' ? body.name.trim() : '';
+    if (!id || typeof id !== 'string') {
+      res.status(400).json({ error: 'User id is required' });
+      return;
+    }
+    if (!name) {
+      res.status(400).json({ error: 'name is required' });
+      return;
+    }
+    await setUserProfileName(id, name);
+    const updated = await getUserById(id);
+    res.json({ ok: true, name: updated?.name ?? name.slice(0, 100) });
+  } catch (e) {
+    res.status(500).json({ error: String(e) });
+  }
+}
+
 /** Main site থেকে রিয়েল ব্যালেন্স সিঙ্ক – লোড/আপডেটের সাথে সাথে ডাটাবেজে সেভ। শুধু রিয়েল অ্যাকাউন্ট। */
 export async function handleSyncBalance(req: Request, res: Response): Promise<void> {
   try {

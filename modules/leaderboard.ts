@@ -7,6 +7,7 @@ import type { Request, Response } from 'express';
 import type { Server as SocketIOServer } from 'socket.io';
 import { tradesCollection } from './db';
 import { getUserById } from './admin-users';
+import { getAdminSocket } from './admin-socket';
 
 const MAX_USERS_FOR_RANK = 2000;
 
@@ -48,6 +49,13 @@ export interface LeaderboardResponse {
   top10: LeaderboardEntry[];
   /** Sorted by pnl desc for client to compute any user's rank */
   allPnl: Array<{ userId: string; pnl: number }>;
+}
+
+export interface LeaderboardUserPnlEnrichedEntry {
+  userId: string;
+  pnl: number;
+  name: string;
+  profilePhoto?: string | null;
 }
 
 export interface LeaderboardUserStats {
@@ -93,11 +101,14 @@ function pnlExpr() {
 export async function getUserPnl(accountId: string): Promise<number> {
   const coll = tradesCollection();
   const cutoffIso = getDhakaDailyCutoffIso();
+  const cutoffDate = new Date(cutoffIso);
   const cursor = coll.aggregate<{ pnl: number }>([
     {
       $match: {
         userId: accountId,
-        createdAt: { $gte: cutoffIso },
+        // createdAt may be string or Date depending on how trades were inserted.
+        // $toDate makes it robust for both cases.
+        $expr: { $gte: [{ $toDate: '$createdAt' }, cutoffDate] },
         $or: [{ accountType: 'real' }, { accountType: { $exists: false } }],
       },
     },
@@ -115,10 +126,11 @@ export async function getUserPnl(accountId: string): Promise<number> {
 export async function getLeaderboard(): Promise<LeaderboardResponse> {
   const coll = tradesCollection();
   const cutoffIso = getDhakaDailyCutoffIso();
+  const cutoffDate = new Date(cutoffIso);
 
   const matchStage = {
     $match: {
-      createdAt: { $gte: cutoffIso },
+      $expr: { $gte: [{ $toDate: '$createdAt' }, cutoffDate] },
       $or: [{ accountType: 'real' }, { accountType: { $exists: false } }],
     },
   };
@@ -131,25 +143,21 @@ export async function getLeaderboard(): Promise<LeaderboardResponse> {
   };
 
   const sortStage = { $sort: { pnl: -1 } };
-  const profitOnlyMatch = { $match: { pnl: { $gt: 0 } } };
-
-  // শুধু প্রফিট করা ইউজার – রেংকিং ও টপ ১০ এর জন্য
+  // Leaderboard ranking by total P&L (profit and loss included)
   const allCursor = coll.aggregate<{ userId: string; pnl: number }>([
     matchStage,
     groupStage,
     sortStage,
-    profitOnlyMatch,
     { $limit: MAX_USERS_FOR_RANK },
     { $project: { userId: '$_id', pnl: 1, _id: 0 } },
   ]);
   const allPnl = await allCursor.toArray();
 
-  // Top 10 শুধু প্রফিট করা – নাম সহ
+  // Top 10 ranked by total P&L (profit and loss included) – with user names
   const top10Cursor = coll.aggregate<{ _id: string; pnl: number }>([
     matchStage,
     groupStage,
     sortStage,
-    profitOnlyMatch,
     { $limit: 10 },
     {
       $lookup: {
@@ -200,9 +208,10 @@ const MAX_USERS_GLOBAL = 5000;
 export async function getAllUsersPnlSorted(): Promise<Array<{ userId: string; pnl: number }>> {
   const coll = tradesCollection();
   const cutoffIso = getDhakaDailyCutoffIso();
+  const cutoffDate = new Date(cutoffIso);
   const matchStage = {
     $match: {
-      createdAt: { $gte: cutoffIso },
+      $expr: { $gte: [{ $toDate: '$createdAt' }, cutoffDate] },
       $or: [{ accountType: 'real' }, { accountType: { $exists: false } }],
     },
   };
@@ -218,8 +227,61 @@ export async function getAllUsersPnlSorted(): Promise<Array<{ userId: string; pn
 }
 
 /**
+ * Admin: same ranking (all users: profit + loss) but enriched with user name + profile photo.
+ * Used for leaderboard page "full control" (details view).
+ */
+export async function getAllUsersPnlSortedEnriched(): Promise<LeaderboardUserPnlEnrichedEntry[]> {
+  const coll = tradesCollection();
+  const cutoffIso = getDhakaDailyCutoffIso();
+
+  const matchStage = {
+    $match: {
+      createdAt: { $gte: cutoffIso },
+      $or: [{ accountType: 'real' }, { accountType: { $exists: false } }],
+    },
+  };
+
+  const groupStage = { $group: { _id: '$userId', pnl: { $sum: pnlExpr() } } };
+
+  const cursor = coll.aggregate<LeaderboardUserPnlEnrichedEntry>([
+    matchStage,
+    groupStage,
+    { $sort: { pnl: -1 } },
+    { $limit: MAX_USERS_GLOBAL },
+    {
+      $lookup: {
+        from: 'users',
+        localField: '_id',
+        foreignField: 'id',
+        as: 'user',
+      },
+    },
+    {
+      $project: {
+        userId: '$_id',
+        pnl: 1,
+        name: {
+          $let: {
+            vars: { u: { $arrayElemAt: ['$user', 0] } },
+            in: { $ifNull: ['$$u.name', 'Unknown'] },
+          },
+        },
+        profilePhoto: {
+          $let: {
+            vars: { u: { $arrayElemAt: ['$user', 0] } },
+            in: { $ifNull: ['$$u.profilePhoto', null] },
+          },
+        },
+      },
+    },
+  ]);
+
+  return cursor.toArray();
+}
+
+/**
  * Viewing user এর স্ট্যাটস: পজিশন সব ইউজারের মধ্যে (লস হলেও পজিশন কাউন্ট), প্রফিট করলে টপ ১০ এর দূরত্ব।
- * রেংকিং লিস্টে শুধু প্রফিট করা ইউজার – কিন্তু "Your position" এ সবসময় পজিশন নম্বর দেখাবে।
+ * রেংকিং লিস্টে (top10) সব ইউজারই তাদের P&L অনুযায়ী দেখানো হয়।
  */
 export async function getUserStats(
   data: LeaderboardResponse,
@@ -233,8 +295,8 @@ export async function getUserStats(
   const allUsers = await getAllUsersPnlSorted();
   const globalIdx = allUsers.findIndex((r) => r.userId === accountId);
   const rank = globalIdx >= 0 ? globalIdx + 1 : null;
-  const idxInProfit = data.allPnl.findIndex((r) => r.userId === accountId);
-  const positionsToTop10 = idxInProfit >= 0 && idxInProfit + 1 > 10 ? idxInProfit + 1 - 10 : 0;
+  const idxInRankList = data.allPnl.findIndex((r) => r.userId === accountId);
+  const positionsToTop10 = idxInRankList >= 0 && idxInRankList + 1 > 10 ? idxInRankList + 1 - 10 : 0;
   return { rank, pnl: myPnl, positionsToTop10, totalUsers };
 }
 
@@ -262,6 +324,48 @@ export async function handleGetLeaderboard(req: Request, res: Response): Promise
   } catch (e) {
     console.error('[Leaderboard] GET failed:', e);
     res.status(500).json({ error: 'Failed to load leaderboard' });
+  }
+}
+
+export interface AdminLeaderboardResponse {
+  top10: LeaderboardEntry[];
+  allUsers: LeaderboardUserPnlEnrichedEntry[];
+  cutoffIso: string;
+  generatedAt: string;
+}
+
+/**
+ * Admin: GET /api/admin/leaderboard
+ * Returns enriched leaderboard data (top10 + all users) for full control.
+ */
+export async function handleAdminGetLeaderboard(_req: Request, res: Response): Promise<void> {
+  try {
+    const [lb, allUsers] = await Promise.all([getLeaderboard(), getAllUsersPnlSortedEnriched()]);
+    res.json({
+      top10: lb.top10,
+      allUsers,
+      cutoffIso: getDhakaDailyCutoffIso(),
+      generatedAt: new Date().toISOString(),
+    } satisfies AdminLeaderboardResponse);
+  } catch (e) {
+    console.error('[Leaderboard][Admin] GET failed:', e);
+    res.status(500).json({ error: 'Failed to load leaderboard' });
+  }
+}
+
+/**
+ * Admin: POST /api/admin/leaderboard/recompute
+ * Forces recompute + broadcast now (instead of waiting for debounce).
+ */
+export async function handleAdminRecomputeLeaderboard(_req: Request, res: Response): Promise<void> {
+  try {
+    const socket = getAdminSocket();
+    const data = await getLeaderboard();
+    if (socket) socket.emit('leaderboard', data);
+    res.json({ ok: true, emittedAt: new Date().toISOString() });
+  } catch (e) {
+    console.error('[Leaderboard][Admin] recompute failed:', e);
+    res.status(500).json({ error: 'Failed to recompute leaderboard' });
   }
 }
 

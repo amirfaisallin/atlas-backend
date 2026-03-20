@@ -133,6 +133,7 @@ app.get('/api/admin/users/:id', adminUsers.handleGetUser);
 app.patch('/api/admin/users/:id/promo', adminUsers.handleSetPromoAccount);
 app.patch('/api/admin/users/:id/promo-credit', adminUsers.handleCreditPromoToReal);
 app.patch('/api/admin/users/:id/real-balance', adminUsers.handleAdminSetRealBalance);
+app.patch('/api/admin/users/:id/profile/name', adminUsers.handleAdminSetUserProfileName);
 app.patch('/api/admin/users/:id/block', adminUsers.handleBlockUser);
 app.patch('/api/admin/users/:id/unblock', adminUsers.handleUnblockUser);
 app.patch('/api/admin/users/:id/ban', adminUsers.handleBanUser);
@@ -195,6 +196,10 @@ app.put('/api/admin/menu-links', menuLinks.handleAdminPut);
 // Admin – support config (support email)
 app.get('/api/admin/support-config', supportConfig.handleAdminGet);
 app.put('/api/admin/support-config', supportConfig.handleAdminPut);
+
+// Admin – leaderboard (top10 + all users)
+app.get('/api/admin/leaderboard', leaderboard.handleAdminGetLeaderboard);
+app.post('/api/admin/leaderboard/recompute', leaderboard.handleAdminRecomputeLeaderboard);
 
 // Gateway config – মেইন সাইটে শুধু On করা মেথড, অ্যাডমিনে সব
 app.get('/api/gateway/config', gatewayConfig.handleGetGatewayConfigPublic);
